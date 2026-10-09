@@ -1,0 +1,10 @@
+RECIPE_DESC="Atheros AR9170 (in-tree carl9170)"
+RECIPE_TYPE=intree
+RECIPE_CHIPSETS="AR9170"
+RECIPE_MODULES="carl9170"
+RECIPE_KCONFIG="CONFIG_WLAN=y CONFIG_WLAN_VENDOR_ATH=y CONFIG_ATH_COMMON=m CONFIG_CARL9170=m"
+RECIPE_KPATHS="drivers/net/wireless/ath"
+RECIPE_DEPS="cfg80211 mac80211"
+RECIPE_FIRMWARE="carl9170-1.fw"
+RECIPE_MONITOR="vif"
+RECIPE_NOTES="carl9170-1.fw is not in linux-firmware; fetch it from the carl9170 project if the download fails."

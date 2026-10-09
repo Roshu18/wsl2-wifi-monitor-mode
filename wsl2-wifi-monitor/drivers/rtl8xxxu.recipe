@@ -1,0 +1,11 @@
+RECIPE_DESC="Realtek RTL8188CU / RTL8192CU / RTL8188EU / RTL8192EU (in-tree rtl8xxxu)"
+RECIPE_TYPE=intree
+RECIPE_CHIPSETS="RTL8188CU RTL8192CU RTL8188EU RTL8192EU RTL8710BU"
+RECIPE_MODULES="rtl8xxxu"
+RECIPE_KCONFIG="CONFIG_WLAN=y CONFIG_WLAN_VENDOR_REALTEK=y CONFIG_RTL8XXXU=m CONFIG_RTL8XXXU_UNTESTED=y"
+RECIPE_KPATHS="drivers/net/wireless/realtek/rtl8xxxu"
+RECIPE_DEPS="cfg80211 mac80211"
+RECIPE_FIRMWARE="rtlwifi/rtl8192cufw_TMSC.bin rtlwifi/rtl8192eu_nic.bin rtlwifi/rtl8188eufw.bin"
+RECIPE_MONITOR="vif"
+RECIPE_CONFLICTS="8188eu r8188eu"
+RECIPE_NOTES="Mainline driver for older Realtek N dongles. Monitor mode works, injection is limited."

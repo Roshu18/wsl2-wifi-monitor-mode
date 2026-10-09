@@ -1,0 +1,11 @@
+RECIPE_DESC="Realtek RTL8188EU / RTL8188EUS (out-of-tree, aircrack-ng)"
+RECIPE_TYPE=oot
+RECIPE_CHIPSETS="RTL8188EU RTL8188EUS"
+RECIPE_MODULES="8188eu"
+RECIPE_REPO="https://github.com/aircrack-ng/rtl8188eus.git"
+RECIPE_REF="v5.3.9"
+RECIPE_DEPS="cfg80211"
+RECIPE_MODPARAMS="rtw_power_mgnt=0"
+RECIPE_MONITOR="type"
+RECIPE_CONFLICTS="r8188eu rtl8xxxu"
+RECIPE_NOTES="TP-Link TL-WN722N v2/v3. Blacklist the in-tree r8188eu/rtl8xxxu to avoid a conflict."

@@ -1,0 +1,10 @@
+RECIPE_DESC="Atheros AR9271 / AR7010 (in-tree ath9k_htc)"
+RECIPE_TYPE=intree
+RECIPE_CHIPSETS="AR9271 AR7010"
+RECIPE_MODULES="ath ath9k_hw ath9k_common ath9k_htc"
+RECIPE_KCONFIG="CONFIG_WLAN=y CONFIG_WLAN_VENDOR_ATH=y CONFIG_ATH_COMMON=m CONFIG_ATH9K_HW=m CONFIG_ATH9K_COMMON=m CONFIG_ATH9K_HTC=m"
+RECIPE_KPATHS="drivers/net/wireless/ath"
+RECIPE_DEPS="cfg80211 mac80211"
+RECIPE_FIRMWARE="ath9k_htc/htc_9271-1.4.0.fw ath9k_htc/htc_7010-1.4.0.fw"
+RECIPE_MONITOR="vif"
+RECIPE_NOTES="The reference monitor-mode chipset (Alfa AWUS036NHA, TL-WN722N v1). Excellent injection."

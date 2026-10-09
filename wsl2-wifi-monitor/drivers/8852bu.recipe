@@ -1,0 +1,10 @@
+RECIPE_DESC="Realtek RTL8852BU Wi-Fi 6 (out-of-tree, morrownr)"
+RECIPE_TYPE=oot
+RECIPE_CHIPSETS="RTL8852BU"
+RECIPE_MODULES="8852bu"
+RECIPE_REPO="https://github.com/morrownr/rtl8852bu.git"
+RECIPE_REF="main"
+RECIPE_DEPS="cfg80211"
+RECIPE_MODPARAMS=""
+RECIPE_MONITOR="type"
+RECIPE_NOTES="Wi-Fi 6 vendor driver. Monitor mode works; injection support is partial."

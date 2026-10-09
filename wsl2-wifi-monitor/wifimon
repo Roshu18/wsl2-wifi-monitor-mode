@@ -1,0 +1,482 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WIFIMON_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+WIFIMON_ROOT="$(cd "$(dirname "$WIFIMON_SELF")" && pwd)"
+WIFIMON_LIB="${WIFIMON_ROOT}/lib"
+WIFIMON_ARGV="$*"
+
+for _f in core platform ksrc registry build load iface doctor; do
+    # shellcheck source=/dev/null
+    source "${WIFIMON_LIB}/${_f}.sh" || { echo "wifimon: cannot load ${_f}.sh" >&2; exit 1; }
+done
+
+WIFIMON_DRIVER="${WIFIMON_DRIVER:-}"
+WIFIMON_IFACE="${WIFIMON_IFACE:-}"
+WIFIMON_MONIFACE="${WIFIMON_MONIFACE:-}"
+WIFIMON_CHANNEL="${WIFIMON_CHANNEL:-}"
+WIFIMON_WIDTH="${WIFIMON_WIDTH:-}"
+WIFIMON_BAND="${WIFIMON_BAND:-auto}"
+WIFIMON_REG="${WIFIMON_REG:-}"
+WIFIMON_TXPOWER="${WIFIMON_TXPOWER:-}"
+WIFIMON_VERIFY=1
+WIFIMON_FORCE=0
+WIFIMON_JSON=0
+
+usage() {
+    cat <<EOF
+wifimon ${WIFIMON_VERSION} - monitor mode for USB Wi-Fi adapters under WSL2
+
+Usage: wifimon <command> [options]
+
+Commands
+  setup              Install dependencies, prepare the kernel tree, build the driver
+  up                 Load the driver and enable monitor mode (the per-session command)
+  build              Rebuild the driver
+  load / unload      Insert or remove the driver modules
+  monitor            Enable monitor mode on an interface
+  managed            Return the interface to managed mode
+  status             Show what is currently loaded and active
+  detect             Identify attached USB Wi-Fi adapters and the driver each needs
+  list-drivers       List available driver recipes
+  list-adapters      List the known adapter database
+  show <driver>      Show one recipe in detail
+  doctor             Run diagnostics ( --json for machine-readable output )
+  install            Put wifimon on PATH and install shell completion
+  install-hooks      Enable monitor mode automatically when the adapter is attached
+  uninstall-hooks    Remove those hooks
+  clean              Remove build artefacts ( --kernel, --drivers, --all )
+  version            Print the version
+
+Common options
+  -d, --driver NAME     Driver recipe to use (default: auto-detect)
+  -i, --iface NAME      Base wireless interface (default: first one found)
+  -m, --mon-iface NAME  Monitor interface name for mac80211 drivers
+  -c, --channel N       Channel to park on
+  -w, --width W         HT20 | HT40+ | HT40- | 80MHz | 160MHz
+  -b, --band B          2.4 | 5 | 6 (disambiguates channel numbers)
+      --reg CC          Regulatory domain, e.g. US
+      --txpower MBM     Fixed transmit power in mBm (2000 = 20 dBm)
+      --no-verify       Skip the post-setup frame capture check
+      --force           Rebuild or reload even when it looks unnecessary
+  -y, --yes             Assume yes for prompts
+  -v, --verbose         More output (repeat for command tracing)
+  -q, --quiet           Errors only
+      --color MODE      auto | always | never
+
+Examples
+  sudo wifimon setup                      Build for the adapter that is plugged in
+  sudo wifimon setup -d ath9k_htc         Build a specific driver
+  sudo wifimon up -c 6                    Monitor mode on channel 6
+  sudo wifimon monitor -c 36 -w 80MHz     5 GHz, 80 MHz wide
+  sudo wifimon doctor                     Work out why something is not working
+EOF
+}
+
+parse_global() {
+    local -a rest=()
+    while (( $# )); do
+        case "$1" in
+            -d|--driver)    WIFIMON_DRIVER="${2:-}"; shift 2 ;;
+            -i|--iface)     WIFIMON_IFACE="${2:-}"; shift 2 ;;
+            -m|--mon-iface) WIFIMON_MONIFACE="${2:-}"; shift 2 ;;
+            -c|--channel)   WIFIMON_CHANNEL="${2:-}"; shift 2 ;;
+            -w|--width)     WIFIMON_WIDTH="${2:-}"; shift 2 ;;
+            -b|--band)      WIFIMON_BAND="${2:-auto}"; shift 2 ;;
+            --reg)          WIFIMON_REG="${2:-}"; shift 2 ;;
+            --txpower)      WIFIMON_TXPOWER="${2:-}"; shift 2 ;;
+            --no-verify)    WIFIMON_VERIFY=0; shift ;;
+            --verify)       WIFIMON_VERIFY=1; shift ;;
+            --force)        WIFIMON_FORCE=1; shift ;;
+            --json)         WIFIMON_JSON=1; shift ;;
+            -y|--yes)       WIFIMON_ASSUME_YES=1; shift ;;
+            -v|--verbose)   WIFIMON_VERBOSITY=$(( WIFIMON_VERBOSITY + 1 )); shift ;;
+            -q|--quiet)     WIFIMON_VERBOSITY=0; shift ;;
+            --color)        WIFIMON_COLOR="${2:-auto}"; core_init_color; shift 2 ;;
+            --color=*)      WIFIMON_COLOR="${1#*=}"; core_init_color; shift ;;
+            --no-log)       WIFIMON_NO_LOGFILE=1; shift ;;
+            --kernel-src)   WIFIMON_KSRC="${2:-}"; shift 2 ;;
+            --kernel-ref)   WIFIMON_KERNEL_REF="${2:-}"; shift 2 ;;
+            -h|--help)      usage; exit 0 ;;
+            --)             shift; rest+=("$@"); break ;;
+            -*)             die "unknown option '$1' (try: wifimon --help)" ;;
+            *)              rest+=("$1"); shift ;;
+        esac
+    done
+    PARSED_ARGS=("${rest[@]+"${rest[@]}"}")
+}
+
+cli_pick_driver() {
+    if [[ -n $WIFIMON_DRIVER ]]; then
+        printf '%s' "$WIFIMON_DRIVER"
+        return 0
+    fi
+    local saved
+    if saved="$(state_get driver 2>/dev/null)" && [[ -n $saved ]] && registry_path "$saved" >/dev/null 2>&1; then
+        log_debug "using driver from previous run: ${saved}"
+        printf '%s' "$saved"
+        return 0
+    fi
+
+    local -a hits=()
+    mapfile -t hits < <(registry_detect 2>/dev/null | awk -F'\t' '$3 != "" && $3 !~ /^module:/ {print $3}' | sort -u)
+    if (( ${#hits[@]} == 1 )); then
+        log_info "auto-detected driver: ${hits[0]}"
+        printf '%s' "${hits[0]}"
+        return 0
+    fi
+    if (( ${#hits[@]} > 1 )); then
+        log_warn "several adapters are attached: ${hits[*]}"
+        log_hint "Pick one with: wifimon ${1:-setup} --driver ${hits[0]}"
+        printf '%s' "${hits[0]}"
+        return 0
+    fi
+
+    log_error "no supported adapter detected and no driver specified"
+    log_hint "Attach the adapter from Windows first:" \
+             "  wifimon.ps1 attach" \
+             "Then, to see what is visible here:" \
+             "  wifimon detect" \
+             "Or choose a driver yourself:" \
+             "  wifimon list-drivers"
+    return 1
+}
+
+cmd_setup() {
+    require_root
+    platform_require_wsl2
+    log_step "Preparing the build environment"
+    platform_install_deps
+    local driver
+    driver="$(cli_pick_driver setup)" || return 1
+    with_lock build_recipe "$driver" || return 1
+    log_step "Loading the driver"
+    load_recipe "$driver" || return 1
+    log_ok "setup complete"
+    printf '\n'
+    log_hint "Next:" \
+             "  sudo wifimon up            enable monitor mode" \
+             "  sudo wifimon up -c 6       enable monitor mode on channel 6"
+    return 0
+}
+
+cmd_build() {
+    require_root
+    local driver
+    driver="$(cli_pick_driver build)" || return 1
+    with_lock build_recipe "$driver"
+}
+
+cmd_load() {
+    require_root
+    local driver
+    driver="$(cli_pick_driver load)" || return 1
+    with_lock load_recipe "$driver"
+}
+
+cmd_unload() {
+    require_root
+    local driver
+    driver="${WIFIMON_DRIVER:-$(state_get driver 2>/dev/null || true)}"
+    [[ -z $driver ]] && die "no driver to unload (pass --driver)"
+    with_lock unload_recipe "$driver"
+}
+
+cmd_monitor() {
+    require_root
+    local driver
+    driver="${WIFIMON_DRIVER:-$(state_get driver 2>/dev/null || true)}"
+    if [[ -n $driver ]]; then
+        registry_load "$driver" >/dev/null 2>&1 || true
+    fi
+    monitor_enable "$WIFIMON_IFACE" "$WIFIMON_MONIFACE" auto || return 1
+
+    state_set monitor_iface "$MON_IFACE"
+    state_set monitor_method "$MON_METHOD"
+    [[ -n ${MON_BASE:-} ]] && state_set base_iface "$MON_BASE"
+
+    iface_set_regdomain "$WIFIMON_REG" || true
+    iface_set_channel "$MON_IFACE" "$WIFIMON_CHANNEL" "$WIFIMON_WIDTH" "$WIFIMON_BAND" || true
+    iface_set_txpower "$MON_IFACE" "$WIFIMON_TXPOWER" || true
+
+    local rc=0
+    if (( WIFIMON_VERIFY )); then
+        monitor_verify "$MON_IFACE" 4 || rc=1
+    fi
+    monitor_summary "$MON_IFACE"
+    return "$rc"
+}
+
+cmd_up() {
+    require_root
+    local driver
+    driver="$(cli_pick_driver up)" || return 1
+    if ! registry_load "$driver"; then
+        return 1
+    fi
+    local primary
+    primary="$(registry_primary_module)"
+    if ! module_present "$primary"; then
+        if ! load_module_file "$primary" >/dev/null 2>&1 && ! module_available "$primary"; then
+            log_error "${driver} has not been built for this kernel yet"
+            log_hint "Run: sudo wifimon setup --driver ${driver}"
+            return 1
+        fi
+        with_lock load_recipe "$driver" || return 1
+    fi
+    cmd_monitor
+}
+
+cmd_managed() {
+    require_root
+    monitor_disable "$WIFIMON_IFACE"
+}
+
+cmd_status() {
+    local driver primary="" loaded="no" mon="none"
+    driver="${WIFIMON_DRIVER:-$(state_get driver 2>/dev/null || echo '')}"
+    if [[ -n $driver ]] && registry_load "$driver" >/dev/null 2>&1; then
+        primary="$(registry_primary_module)"
+        module_loaded "$primary" && loaded="yes"
+    fi
+    local -a ifs=()
+    mapfile -t ifs < <(iface_list_wireless)
+    local i
+    for i in "${ifs[@]+"${ifs[@]}"}"; do
+        if iface_is_monitor "$i"; then
+            mon="$i"
+            break
+        fi
+    done
+
+    printf '%skernel%s        %s\n' "$_C_BLD" "$_C_RESET" "$PLAT_KERNEL"
+    printf '%sdriver%s        %s\n' "$_C_BLD" "$_C_RESET" "${driver:-none selected}"
+    printf '%smodule%s        %s (loaded: %s)\n' "$_C_BLD" "$_C_RESET" "${primary:-?}" "$loaded"
+    printf '%sinterfaces%s    %s\n' "$_C_BLD" "$_C_RESET" "${ifs[*]:-none}"
+    printf '%smonitor mode%s  %s\n' "$_C_BLD" "$_C_RESET" "$mon"
+    if [[ $mon != none ]]; then
+        local ch
+        ch="$(iw dev "$mon" info 2>/dev/null | awk '/channel/{print; exit}' | sed 's/^[[:space:]]*//')"
+        [[ -n $ch ]] && printf '%schannel%s       %s\n' "$_C_BLD" "$_C_RESET" "$ch"
+        printf '%sframes seen%s   %s\n' "$_C_BLD" "$_C_RESET" "$(iface_rx_packets "$mon")"
+    fi
+    return 0
+}
+
+cmd_detect() {
+    local rows=0 line ids chipset recipe name
+    while IFS= read -r line; do
+        rows=$(( rows + 1 ))
+        IFS=$'\t' read -r ids chipset recipe name <<<"$line"
+        printf '%s%s%s  %s\n' "$_C_BLD" "$ids" "$_C_RESET" "${name:-unknown}"
+        printf '  chipset : %s\n' "${chipset:-unknown}"
+        if [[ $recipe == module:* ]]; then
+            printf '  driver  : in-kernel module %s (no build needed)\n' "${recipe#module:}"
+        elif [[ -n $recipe ]]; then
+            printf '  driver  : %s\n' "$recipe"
+            local alts
+            alts="$(adapters_rows | awk -F'\t' -v v="${ids%%:*}" -v p="${ids##*:}" \
+                'tolower($1)==v && tolower($2)==p {print $6; exit}')"
+            [[ -n $alts ]] && printf '  also    : %s\n' "$alts"
+            printf '  build   : sudo wifimon setup --driver %s\n' "$recipe"
+        else
+            printf '  driver  : unknown - see: wifimon list-drivers\n'
+        fi
+        printf '\n'
+    done < <(registry_detect || true)
+
+    if (( rows == 0 )); then
+        log_warn "no USB Wi-Fi adapter visible in this distro"
+        log_hint "Attach it from Windows (PowerShell as Administrator):" \
+                 "  .\\windows\\wifimon.ps1 attach" \
+                 "Then check again: wifimon detect"
+        return 1
+    fi
+    return 0
+}
+
+cmd_list_drivers() {
+    local name
+    printf '%-12s %-7s %s\n' "RECIPE" "TYPE" "DESCRIPTION"
+    while read -r name; do
+        registry_load "$name" >/dev/null 2>&1 || continue
+        local mark=""
+        registry_recipe_supported || mark=" (needs kernel ${RECIPE_MIN_KERNEL}+)"
+        printf '%-12s %-7s %s%s\n' "$RECIPE_NAME" "$RECIPE_TYPE" "${RECIPE_DESC}" "$mark"
+    done < <(registry_list)
+    return 0
+}
+
+cmd_list_adapters() {
+    printf '%-10s %-12s %-11s %s\n' "USB ID" "CHIPSET" "DRIVER" "ADAPTER"
+    adapters_rows | awk -F'\t' '{printf "%-10s %-12s %-11s %s\n", $1":"$2, $3, $4, $5}' | sort -k3,3 -k1,1
+    return 0
+}
+
+cmd_show() {
+    local name="${1:-}"
+    [[ -z $name ]] && die "usage: wifimon show <driver>"
+    registry_show "$name"
+}
+
+cmd_install() {
+    require_root
+    local target="/usr/local/bin/wifimon"
+    if [[ -e $target && ! -L $target ]]; then
+        log_warn "${target} exists and is not a symlink; leaving it alone"
+    else
+        ln -sfn "$WIFIMON_SELF" "$target"
+        log_ok "wifimon is on PATH (${target})"
+    fi
+    local comp="${WIFIMON_ROOT}/completions/wifimon.bash"
+    if [[ -r $comp ]]; then
+        local dir
+        for dir in /usr/share/bash-completion/completions /etc/bash_completion.d; do
+            [[ -d $dir ]] || continue
+            install -m 0644 "$comp" "${dir}/wifimon" && log_ok "bash completion installed in ${dir}"
+            break
+        done
+    fi
+    mkdir -p "$WIFIMON_ETC"
+    if [[ ! -e "${WIFIMON_ETC}/config" ]]; then
+        cat >"${WIFIMON_ETC}/config" <<EOF
+driver=${WIFIMON_DRIVER:-}
+interface=${WIFIMON_IFACE:-}
+channel=${WIFIMON_CHANNEL:-}
+width=${WIFIMON_WIDTH:-}
+regdomain=${WIFIMON_REG:-}
+EOF
+        log_ok "wrote ${WIFIMON_ETC}/config"
+    fi
+    return 0
+}
+
+cmd_install_hooks() {
+    require_root
+    local driver
+    driver="${WIFIMON_DRIVER:-$(state_get driver 2>/dev/null || true)}"
+    [[ -z $driver ]] && die "build a driver first, or pass --driver"
+
+    local rule="/etc/udev/rules.d/99-wifimon.rules"
+    local args=""
+    [[ -n $WIFIMON_CHANNEL ]] && args="${args} --channel ${WIFIMON_CHANNEL}"
+    [[ -n $WIFIMON_WIDTH ]] && args="${args} --width ${WIFIMON_WIDTH}"
+    [[ -n $WIFIMON_REG ]] && args="${args} --reg ${WIFIMON_REG}"
+
+    if have_cmd systemctl && [[ -d /run/systemd/system ]]; then
+        local unit="/etc/systemd/system/wifimon-monitor@.service"
+        cat >"$unit" <<EOF
+[Unit]
+Description=Enable monitor mode on %i
+After=sys-subsystem-net-devices-%i.device
+BindsTo=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${WIFIMON_SELF} monitor --iface %i --driver ${driver} --no-verify --quiet${args}
+EOF
+        cat >"$rule" <<EOF
+ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="wifimon-monitor@%k.service"
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        log_ok "installed ${unit} and ${rule}"
+    else
+        cat >"$rule" <<EOF
+ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", RUN+="/bin/sh -c '${WIFIMON_SELF} monitor --iface %k --driver ${driver} --no-verify --quiet${args} >/dev/null 2>&1 &'"
+EOF
+        log_ok "installed ${rule}"
+        log_hint "systemd is not running here, so monitor mode is enabled straight from udev." \
+                 "To get systemd in WSL2, put this in /etc/wsl.conf and run 'wsl --shutdown':" \
+                 "  [boot]" \
+                 "  systemd=true"
+    fi
+
+    if have_cmd udevadm; then
+        udevadm control --reload-rules 2>/dev/null || true
+        log_debug "udev rules reloaded"
+    fi
+    log_hint "To also load the driver at distro start, add to /etc/wsl.conf:" \
+             "  [boot]" \
+             "  command=\"${WIFIMON_SELF} load --quiet\""
+    return 0
+}
+
+cmd_uninstall_hooks() {
+    require_root
+    local removed=0 f
+    for f in /etc/udev/rules.d/99-wifimon.rules /etc/systemd/system/wifimon-monitor@.service; do
+        [[ -e $f ]] && { rm -f "$f"; log_ok "removed ${f}"; removed=1; }
+    done
+    (( removed )) || log_info "no hooks were installed"
+    have_cmd systemctl && systemctl daemon-reload 2>/dev/null || true
+    have_cmd udevadm && udevadm control --reload-rules 2>/dev/null || true
+    return 0
+}
+
+cmd_clean() {
+    require_root
+    local what="${1:-}"
+    local did=0
+    case "$what" in
+        --kernel|kernel)
+            rm -rf "$(ksrc_cache_root)" "${WIFIMON_CACHE}/downloads"
+            log_ok "removed the cached kernel source"
+            did=1
+            ;;
+        --drivers|drivers)
+            rm -rf "${WIFIMON_CACHE}/drivers"
+            log_ok "removed the cached driver sources"
+            did=1
+            ;;
+        --all|all)
+            rm -rf "$WIFIMON_CACHE" "$(build_modules_target_dir)"
+            build_depmod
+            log_ok "removed everything wifimon built"
+            did=1
+            ;;
+    esac
+    if (( ! did )); then
+        log_error "say what to clean: --kernel, --drivers or --all"
+        return 1
+    fi
+    return 0
+}
+
+main() {
+    (( $# == 0 )) && { usage; exit 0; }
+    local cmd="$1"; shift
+    PARSED_ARGS=()
+    parse_global "$@"
+    set -- "${PARSED_ARGS[@]+"${PARSED_ARGS[@]}"}"
+
+    (( WIFIMON_VERBOSITY >= 3 )) && set -x
+    ensure_dirs
+    config_load
+    platform_detect
+
+    case "$cmd" in
+        setup)            cmd_setup ;;
+        up)               cmd_up ;;
+        build)            cmd_build ;;
+        load)             cmd_load ;;
+        unload)           cmd_unload ;;
+        monitor|mon)      cmd_monitor ;;
+        managed)          cmd_managed ;;
+        status)           cmd_status ;;
+        detect)           cmd_detect ;;
+        list-drivers)     cmd_list_drivers ;;
+        list-adapters)    cmd_list_adapters ;;
+        show)             cmd_show "${1:-}" ;;
+        doctor)           doctor_run "$WIFIMON_JSON" ;;
+        install)          cmd_install ;;
+        install-hooks)    cmd_install_hooks ;;
+        uninstall-hooks)  cmd_uninstall_hooks ;;
+        clean)            cmd_clean "${1:-}" ;;
+        version|--version) printf 'wifimon %s\n' "$WIFIMON_VERSION" ;;
+        help|--help|-h)   usage ;;
+        *)                log_error "unknown command '${cmd}'"; usage; exit 2 ;;
+    esac
+}
+
+main "$@"

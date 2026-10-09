@@ -1,0 +1,11 @@
+RECIPE_DESC="Realtek RTL8812AU / RTL8821AU (out-of-tree, morrownr)"
+RECIPE_TYPE=oot
+RECIPE_CHIPSETS="RTL8812AU RTL8821AU"
+RECIPE_MODULES="8812au"
+RECIPE_REPO="https://github.com/morrownr/8812au-20210629.git"
+RECIPE_REF="main"
+RECIPE_DEPS="cfg80211"
+RECIPE_MODPARAMS="rtw_power_mgnt=0 rtw_enusbss=0"
+RECIPE_MONITOR="type"
+RECIPE_CONFLICTS="rtw88_8812au"
+RECIPE_NOTES="Alfa AWUS036ACH and similar AC1200 adapters. Full injection support."

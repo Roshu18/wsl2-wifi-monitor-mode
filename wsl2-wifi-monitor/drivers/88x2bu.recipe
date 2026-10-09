@@ -1,0 +1,11 @@
+RECIPE_DESC="Realtek RTL8812BU / RTL8822BU (out-of-tree, morrownr)"
+RECIPE_TYPE=oot
+RECIPE_CHIPSETS="RTL8812BU RTL8822BU"
+RECIPE_MODULES="88x2bu"
+RECIPE_REPO="https://github.com/morrownr/88x2bu-20210702.git"
+RECIPE_REF="main"
+RECIPE_DEPS="cfg80211"
+RECIPE_MODPARAMS="rtw_power_mgnt=0 rtw_enusbss=0"
+RECIPE_MONITOR="type"
+RECIPE_CONFLICTS="rtw88_8822bu rtw_8822bu"
+RECIPE_NOTES="Mature vendor driver with frame injection. TP-Link Archer T3U/T3U Plus/T4U v3."
